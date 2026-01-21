@@ -1,6 +1,6 @@
 cd ..
-git clone git@github.com:565353780/camera-control.git
-git clone git@github.com:565353780/tetra-triangulation.git
+git clone https://github.com/565353780/camera-control.git
+git clone https://github.com/565353780/tetra-triangulation.git
 git clone --depth 1 https://github.com/camenduru/simple-knn.git
 git clone --depth 1 https://github.com/rahul-goel/fused-ssim.git
 
@@ -15,10 +15,10 @@ pip install open3d trimesh scikit-image opencv-python \
   plyfile tqdm
 
 cd camera-control
-./dev_setup.sh
+./setup.sh
 
 cd ../tetra-triangulation
-./dev_setup.sh
+./setup.sh
 
 cd ../simple-knn
 python setup.py install
