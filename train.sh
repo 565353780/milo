@@ -14,8 +14,15 @@ cd milo
 CUDA_VISIBLE_DEVICES=3 \
   python train.py \
   -s ${DATA_FOLDER}/colmap/ \
-  -m ${DATA_FOLDER}/milo/ \
+  -m ${DATA_FOLDER}/milo_white/ \
   --imp_metric "indoor" \
   --rasterizer "radegs" \
+  --white_background \
   --log_interval 200 \
   --mesh_config "default"
+
+CUDA_VISIBLE_DEVICES=3 \
+  python mesh_extract_sdf.py \
+  -s ${DATA_FOLDER}/colmap/ \
+  -m ${DATA_FOLDER}/milo_white/ \
+  --rasterizer "radegs"
