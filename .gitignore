@@ -12,7 +12,6 @@ utils/__pycache__
 *.egg-info
 debug*
 dtu_eval/Offical_DTU_Dataset
-*.sh
 submodules/diff-gaussian-rasterization-org
 snapshot_fw.dump
 snapshot_bw.dump
