@@ -24,11 +24,7 @@ import uuid
 from tqdm import tqdm
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams, read_config
-try:
-    import wandb
-    WANDB_FOUND = True
-except ImportError:
-    WANDB_FOUND = False
+from torch.utils.tensorboard import SummaryWriter
 
 import numpy as np
 import time
@@ -479,8 +475,8 @@ def training(
 
     print('Num of Gaussians: %d'%(gaussians._xyz.shape[0]))
     
-    if WANDB_FOUND:
-        run.finish()
+    if run is not None:
+        run.close()
     
     return 
 
@@ -499,22 +495,10 @@ def prepare_output_and_logger(dataset, args):
     with open(os.path.join(dataset.model_path, "cfg_args"), 'w') as cfg_log_f:
         cfg_log_f.write(str(Namespace(**vars(dataset))))
 
-    # Create WandB run       
-    global WANDB_FOUND
-    WANDB_FOUND = (
-        WANDB_FOUND
-        and (args.wandb_project is not None)
-        and (args.wandb_entity is not None)
-    )
-    if WANDB_FOUND:
-        run = wandb.init(
-            project=args.wandb_project,
-            entity=args.wandb_entity,
-            config=args,
-        )
-    else:
-        run=None
-        print("[INFO] WandB not found, skipping logging.")
+    # Create TensorBoard SummaryWriter
+    log_dir = os.path.join(dataset.model_path, "tensorboard")
+    run = SummaryWriter(log_dir=log_dir)
+    print(f"[INFO] TensorBoard logging to {log_dir}")
     return run
 
 
@@ -585,9 +569,10 @@ if __name__ == "__main__":
 
     # ----- Logging -----
     parser.add_argument("--log_interval", type=int, default=None)
-    parser.add_argument("--wandb_project", type=str, default=None)
-    parser.add_argument("--wandb_entity", type=str, default=None)
-    
+    # 保留以下参数以兼容调用脚本，现已使用 TensorBoard，不再使用
+    parser.add_argument("--wandb_project", type=str, default=None, help="(deprecated, use TensorBoard)")
+    parser.add_argument("--wandb_entity", type=str, default=None, help="(deprecated, use TensorBoard)")
+
     args = parser.parse_args(sys.argv[1:])
 
     args = read_config(parser)

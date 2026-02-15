@@ -6,8 +6,10 @@ cd milo
 
 CUDA_VISIBLE_DEVICES=3 \
   python train.py \
-  -s ${DATA_FOLDER}/normalized_colmap/ \
+  -s ${DATA_FOLDER}/colmap_normalized/ \
   -m ${DATA_FOLDER}/milo/ \
+  --images masked_images \
+  -r 1 \
   --imp_metric "indoor" \
   --rasterizer "radegs" \
   --white_background \
@@ -16,6 +18,8 @@ CUDA_VISIBLE_DEVICES=3 \
 
 CUDA_VISIBLE_DEVICES=3 \
   python mesh_extract_sdf.py \
-  -s ${DATA_FOLDER}/normalized_colmap/ \
+  -s ${DATA_FOLDER}/colmap_normalized/ \
   -m ${DATA_FOLDER}/milo/ \
+  --images masked_images \
+  -r 1 \
   --rasterizer "radegs"

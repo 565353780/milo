@@ -8,10 +8,6 @@ from utils.geometry_utils import depth_to_normal
 from utils.image_utils import psnr
 from utils.loss_utils import l1_loss, ssim, L1_loss_appearance
 from lpipsPyTorch import lpips
-try:
-    import wandb
-except ImportError:
-    pass
 
 
 def fix_normal_map(view, normal, normal_in_view_space=True):
@@ -180,7 +176,7 @@ def log_training_progress(
     # Additional arguments
     testing_iterations:List[int], saving_iterations:List[int], render_imp,
 ):
-    WANDB_FOUND = run is not None
+    USE_TENSORBOARD = run is not None
     
     # ---Progress bar---
     ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
@@ -271,40 +267,43 @@ def log_training_progress(
             ncols=3,
             figsize=30,
             show_plot=False,
-            save_plot=not WANDB_FOUND,
+            save_plot=not USE_TENSORBOARD,
             save_path=os.path.join(args.model_path, f"iter_{iteration}.png"),
-            return_log_images=WANDB_FOUND,
+            return_log_images=USE_TENSORBOARD,
         )
         
-        if WANDB_FOUND:
-            # Log metrics
-            wandb_log_dict = {}
-            for key, value in postfix_dict.items():
-                try:
-                    wandb_log_dict[key] = float(value)
-                except:
-                    wandb_log_dict[key] = value
-            run.log(wandb_log_dict, step=iteration)
+        if USE_TENSORBOARD:
+            # Log metrics to TensorBoard
+            run.add_scalar("train/Loss", ema_loss_for_log, iteration)
+            if reg_kick_on:
+                run.add_scalar("train/DNLoss", ema_depth_normal_loss_for_log, iteration)
+            if depth_order_kick_on:
+                run.add_scalar("train/DOLoss", ema_depth_order_loss_for_log, iteration)
+            if mesh_kick_on:
+                run.add_scalar("train/MDLoss", ema_mesh_depth_loss_for_log, iteration)
+                run.add_scalar("train/MNLoss", ema_mesh_normal_loss_for_log, iteration)
+                if mesh_config["enforce_occupied_centers"]:
+                    run.add_scalar("train/OccLoss", ema_occupied_centers_loss_for_log, iteration)
+                if mesh_config["use_occupancy_labels_loss"]:
+                    run.add_scalar("train/OccLabLoss", ema_occupancy_labels_loss_for_log, iteration)
+            run.add_scalar("train/N_Gauss", gaussians._xyz.shape[0], iteration)
             
-            # Log images
-            wandb_log_images_dict = {}
+            # Log images to TensorBoard (expects CHW, 0-1 float)
             for log_img_name, log_img in log_images_dict.items():
-                wandb_img_to_log = log_img.clone().detach().squeeze()
-                # If grayscale, scale to 0-1 and apply colormap
-                if wandb_img_to_log.ndim < 3:
-                    wandb_img_to_log = (wandb_img_to_log - wandb_img_to_log.min()) / (wandb_img_to_log.max() - wandb_img_to_log.min())
+                tag = "images/" + log_img_name.replace(str(viewpoint_idx), "").strip()
+                img_to_log = log_img.clone().detach().squeeze()
+                if img_to_log.ndim < 3:
+                    img_to_log = (img_to_log - img_to_log.min()) / (img_to_log.max() - img_to_log.min() + 1e-8)
                     cmap = plt.get_cmap('Spectral')
-                    wandb_img_to_log = cmap(wandb_img_to_log)[..., :3]
-                    wandb_img_to_log = torch.from_numpy(wandb_img_to_log).to(torch.float32)
-                # If float, scale to 0-255
-                if wandb_img_to_log.dtype == torch.float32:
-                    wandb_img_to_log = (wandb_img_to_log.clamp(0., 1.) * 255).to(torch.uint8)
-                # Convert to wandb image
-                wandb_img_to_log = wandb_img_to_log.cpu().numpy()
-                wandb_log_images_dict[log_img_name.replace(str(viewpoint_idx), "")] = wandb.Image(
-                    wandb_img_to_log, caption=log_img_name
-                )
-            run.log(wandb_log_images_dict, step=iteration)
+                    img_to_log = cmap(img_to_log.cpu().numpy())[..., :3]
+                    img_to_log = torch.from_numpy(img_to_log).to(torch.float32)
+                if img_to_log.ndim == 3 and img_to_log.shape[-1] == 3:
+                    img_to_log = img_to_log.permute(2, 0, 1)  # HWC -> CHW
+                if img_to_log.dtype != torch.float32:
+                    img_to_log = img_to_log.float().clamp(0., 1.)
+                else:
+                    img_to_log = img_to_log.clamp(0., 1.)
+                run.add_image(tag, img_to_log, iteration, dataformats="CHW")
 
     # ---Report---
     training_report(iteration, l1_loss, testing_iterations, scene, render_imp, (pipe, background))
