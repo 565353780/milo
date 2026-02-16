@@ -1,5 +1,5 @@
-import torch
 import gc
+import torch
 from tqdm import tqdm
 # from utils.graphics_utils import depth_double_to_normal
 from regularization.depth.depth_order import compute_depth_order_loss
@@ -8,9 +8,9 @@ from regularization.depth.depth_order import compute_depth_order_loss
 
 
 def initialize_depth_order_supervision(
-    scene, 
-    config:dict, 
-    device='cuda'
+    scene,
+    config:dict,
+    device='cuda',
 ):
     """
     Initializes depth priors using DepthAnythingV2.
@@ -60,8 +60,7 @@ def initialize_depth_order_supervision(
 def compute_depth_order_regularization(
     iteration: int,
     rendered_depth: torch.Tensor,
-    depth_priors: list,
-    viewpoint_idx: int,
+    depth_prior: torch.Tensor,
     gaussians,
     config: dict,
 ):
@@ -72,7 +71,6 @@ def compute_depth_order_regularization(
         iteration: Current training iteration.
         rendered_depth: Tensor containing rendered depth. Has shape (1, H, W).
         depth_priors: List of precomputed depth priors.
-        viewpoint_idx: Index of the current viewpoint camera.
         gaussians: The GaussianModel object.
         config: Configuration dictionary for depth order supervision.
         require_depth: Flag indicating if depth was rendered.
@@ -96,10 +94,10 @@ def compute_depth_order_regularization(
         zero_depth = None
         zero_supervision = None
         return zero_loss, zero_depth, zero_supervision, lambda_depth_order
-    
+
     # Resize supervision depth to match rendered depth size if necessary
     # Can be useful at beginning of training, when resolution warmup is active
-    supervision_depth: torch.Tensor = depth_priors[viewpoint_idx].to(rendered_depth.device)
+    supervision_depth: torch.Tensor = depth_prior.to(rendered_depth.device)
     _, sup_H, sup_W = supervision_depth.shape
     _, H, W = rendered_depth.shape
     if sup_H != H or sup_W != W:
@@ -109,7 +107,7 @@ def compute_depth_order_regularization(
             mode="bilinear", 
             align_corners=True
         ).view(rendered_depth.shape)
-        
+
     # Compute depth prior loss
     depth_prior_loss: torch.Tensor = lambda_depth_order * compute_depth_order_loss(
         depth=rendered_depth.squeeze(),

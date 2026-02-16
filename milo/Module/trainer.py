@@ -2,8 +2,6 @@ import os
 import gc
 import sys
 import yaml
-import time
-from functools import partial
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.abspath(os.path.join(BASE_DIR, '..'))
 SUBMODULES_DIR = os.path.join(ROOT_DIR, 'submodules')
@@ -11,16 +9,11 @@ sys.path.append(ROOT_DIR)
 sys.path.append(SUBMODULES_DIR)
 sys.path.append(os.path.join(SUBMODULES_DIR, 'Depth-Anything-V2'))
 
-import uuid
 import torch
-import numpy as np
-import open3d as o3d
-from random import randint
 
-from torch import nn
-from tqdm import tqdm
 from typing import Tuple
-from copy import deepcopy
+from functools import partial
+from tqdm import tqdm, trange
 from argparse import ArgumentParser
 
 from fused_ssim import fused_ssim
@@ -28,13 +21,11 @@ from fused_ssim import fused_ssim
 from base_gs_trainer.Loss.l1 import l1_loss
 from base_gs_trainer.Module.base_gs_trainer import BaseGSTrainer
 
-from utils.general_utils import inverse_sigmoid
-from utils.mesh_utils import GaussianExtractor, post_process_mesh
 from gaussian_renderer import render_imp, render_simp, render_depth, render_full
 
-from utils.loss_utils import l1_loss, L1_loss_appearance
+from utils.log_utils import fix_normal_map
 from utils.geometry_utils import depth_to_normal
-from utils.log_utils import log_training_progress
+from utils.loss_utils import L1_loss_appearance
 from regularization.regularizer.depth_order import (
     initialize_depth_order_supervision,
     compute_depth_order_regularization,
@@ -44,6 +35,21 @@ from regularization.regularizer.mesh import (
     compute_mesh_regularization,
     reset_mesh_state_at_next_iteration,
 )
+
+# Import rendering function
+rasterizer = 'radegs'
+print(f"[INFO] Using {rasterizer} as rasterizer.")
+if rasterizer == "radegs":
+    from gaussian_renderer.radegs import render_radegs as render
+    from gaussian_renderer.radegs import integrate_radegs as integrate
+elif rasterizer == "gof":
+    from gaussian_renderer.gof import render_gof as render
+    from gaussian_renderer.gof import integrate_gof as integrate
+else:
+    print('rasterizer must in [radegs, gof]!')
+    exit()
+
+
 
 from milo.Config.config import ModelParams, PipelineParams, OptimizationParams
 from milo.Method.render_kernel import render
@@ -129,12 +135,21 @@ class Trainer(BaseGSTrainer):
 
         # ---Prepare Depth-Order Regularization---    
         print("[INFO] Using depth order regularization.")
-        print(f"        > Using expected depth with depth_ratio {depth_order_config['depth_ratio']} for depth order regularization.")
+        print(f"        > Using expected depth with depth_ratio {self.depth_order_config['depth_ratio']} for depth order regularization.")
         self.depth_priors = initialize_depth_order_supervision(
             scene=self.scene,
             config=self.depth_order_config,
             device='cuda',
         )
+
+        # ---Prepare Mesh-In-the-Loop Regularization---
+        if self.args.mesh_regularization:
+            print("[INFO] Using mesh regularization.")
+            self.mesh_renderer, self.mesh_state = initialize_mesh_regularization(
+                scene=self.scene,
+                config=self.mesh_config,
+            )
+
 
         # Get mesh regularization config file
         mesh_config_file = os.path.join(BASE_DIR, "configs", "mesh", f"{args.mesh_config}.yaml")
@@ -144,15 +159,6 @@ class Trainer(BaseGSTrainer):
 
         # Message for imp_metric
         print(f"[INFO] Using importance metric: {args.imp_metric}.")
-
-        # Import rendering function
-        print(f"[INFO] Using {args.rasterizer} as rasterizer.")
-        if args.rasterizer == "radegs":
-            from gaussian_renderer.radegs import render_radegs as render
-            from gaussian_renderer.radegs import integrate_radegs as integrate
-        elif args.rasterizer == "gof":
-            from gaussian_renderer.gof import render_gof as render
-            from gaussian_renderer.gof import integrate_gof as integrate
 
         print("Optimizing " + args.model_path)
 
@@ -186,14 +192,14 @@ class Trainer(BaseGSTrainer):
             print("[INFO] Using dense Gaussians.")
 
         # Initialize culling stats
-        mask_blur = torch.zeros(self.gaussians._xyz.shape[0], device='cuda')
+        self.mask_blur = torch.zeros(self.gaussians._xyz.shape[0], device='cuda')
         self.gaussians.init_culling(len(self.scene.train_cameras))
 
         # Initialize 3D Mip filter
-        if use_mip_filter:
-            self.gaussians.compute_3D_filter(cameras=self.scene.train_cameras)
+        self.compute_3D_filter()
 
         self.args = args
+        self.depth_order_kick_on = True
         return
 
     def render(self, viewpoint_cam) -> dict:
@@ -230,31 +236,29 @@ class Trainer(BaseGSTrainer):
     def trainStep(
         self,
         iteration: int,
-        viewpoint_cam,
-        lambda_dssim: float = 0.2,
-        lambda_normal: float = 0.01,
-        lambda_dist: float = 0.01,
-        lambda_opacity: float = 0.01,
-        lambda_scaling: float = 1.0,
     ) -> Tuple[dict, dict]:
         self.gaussians.update_learning_rate(iteration)
 
         if iteration % 1000 == 0:
             self.gaussians.oneupSHdegree()
 
+        viewpoint_idx = iteration % len(self.scene)
+
+        viewpoint_cam = self.scene(viewpoint_idx)
+        depth_prior = self.depth_priors[viewpoint_idx]
+
         reg_kick_on = iteration >= self.args.regularization_from_iter
         mesh_kick_on = iteration >= self.mesh_config["start_iter"]
-        depth_order_kick_on = True
 
         # If depth-normal regularization or mesh-in-the-loop regularization are active,
         # we use the rasterizer compatible with depth and normal rendering.
         if reg_kick_on or mesh_kick_on:
-            render_pkg = self.render()
+            render_pkg = self.render(viewpoint_cam)
 
         # Else, if depth-order regularization is active, we use Mini-Splatting2 rasterizer 
         # but we render depth maps. This rasterizer is necessary for densification and simplification.
         else:
-            render_pkg = self.render_full()
+            render_pkg = self.render_full(viewpoint_cam)
 
         image, viewspace_point_tensor, visibility_filter, radii = (
             render_pkg["render"], render_pkg["viewspace_points"], 
@@ -270,7 +274,7 @@ class Trainer(BaseGSTrainer):
 
         reg_loss = l1_loss(image, gt_image)
         ssim_loss = 1.0 - fused_ssim(image.unsqueeze(0), gt_image.unsqueeze(0))
-        rgb_loss = (1.0 - lambda_dssim) * reg_loss + lambda_dssim * ssim_loss
+        rgb_loss = (1.0 - self.opt.lambda_dssim) * reg_loss + self.opt.lambda_dssim * ssim_loss
 
         # Depth-Normal Consistency Regularization
         depth_normal_loss = torch.zeros(1, device=self.device)
@@ -294,14 +298,11 @@ class Trainer(BaseGSTrainer):
                 # If shape is 3, H, W
                 depth_normal_loss = self.args.lambda_depth_normal * (1 - (rendered_normals * rendered_depth_to_normals).sum(dim=0)).mean()
 
-        loss = \
-            rgb_loss + \
-            depth_normal_loss
-
         # Depth Order Regularization
         # > This loss relies on Depth-AnythingV2, and is not used in MILo paper.
         # > In the paper, MILo does not rely on any learned prior. 
-        if depth_order_kick_on:
+        depth_prior_loss = torch.zeros(1, device=self.device)
+        if self.depth_order_kick_on:
             if self.depth_order_config["depth_ratio"] < 1.:
                 depth_for_depth_order = (
                     (1. - self.depth_order_config["depth_ratio"]) * render_pkg["expected_depth"]
@@ -310,19 +311,23 @@ class Trainer(BaseGSTrainer):
             else:
                 depth_for_depth_order = render_pkg["median_depth"]
 
-            depth_prior_loss, _, do_supervision_depth, lambda_depth_order = compute_depth_order_regularization(
+            depth_prior_loss, _, _, lambda_depth_order = compute_depth_order_regularization(
                 iteration=iteration,
                 rendered_depth=depth_for_depth_order,
-                depth_priors=self.depth_priors,
-                viewpoint_idx=viewpoint_idx,
+                depth_prior=depth_prior,
                 gaussians=self.gaussians,
                 config=self.depth_order_config,
             )
 
-            loss = loss + depth_prior_loss
-            depth_order_kick_on = lambda_depth_order > 0
+            self.depth_order_kick_on = lambda_depth_order > 0
 
         # Mesh-In-the-Loop Regularization
+        mesh_loss = torch.zeros(1, device=self.device)
+        mesh_depth_loss = torch.zeros(1, device=self.device)
+        mesh_normal_loss = torch.zeros(1, device=self.device)
+        occupied_centers_loss = torch.zeros(1, device=self.device)
+        occupancy_labels_loss = torch.zeros(1, device=self.device)
+        mesh_render_pkg = {}
         if mesh_kick_on:
             mesh_regularization_pkg = compute_mesh_regularization(
                 iteration=iteration,
@@ -335,11 +340,11 @@ class Trainer(BaseGSTrainer):
                 background=self.background,
                 kernel_size=0.0,
                 config=self.mesh_config,
-                mesh_renderer=mesh_renderer,
-                mesh_state=mesh_state,
+                mesh_renderer=self.mesh_renderer,
+                mesh_state=self.mesh_state,
                 render_func=partial(render, require_coord=False, require_depth=True),
-                weight_adjustment=100. / opt.iterations,
-                args=args,
+                weight_adjustment=100. / self.opt.iterations,
+                args=self.args,
                 integrate_func=integrate,
             )
             mesh_loss = mesh_regularization_pkg["mesh_loss"]
@@ -347,91 +352,84 @@ class Trainer(BaseGSTrainer):
             mesh_normal_loss = mesh_regularization_pkg["mesh_normal_loss"]
             occupied_centers_loss = mesh_regularization_pkg["occupied_centers_loss"]
             occupancy_labels_loss = mesh_regularization_pkg["occupancy_labels_loss"]
-            mesh_state = mesh_regularization_pkg["updated_state"]
+            self.mesh_state = mesh_regularization_pkg["updated_state"]
             mesh_render_pkg = mesh_regularization_pkg["mesh_render_pkg"]
-            
-            loss = loss + mesh_loss
-        
+
+        total_loss = \
+            rgb_loss + \
+            depth_normal_loss + \
+            depth_prior_loss + \
+            mesh_loss
+
         # ---Backward pass---
-        loss.backward()
-
-        reg_loss = l1_loss(image, gt_image)
-        ssim_loss = 1.0 - fused_ssim(image.unsqueeze(0), gt_image.unsqueeze(0))
-        rgb_loss = (1.0 - lambda_dssim) * reg_loss + lambda_dssim * ssim_loss
-
-        lambda_normal = lambda_normal if iteration > 1000 else 0.0
-        normal_loss = torch.zeros([1], dtype=rgb_loss.dtype).to(rgb_loss.device)
-        if lambda_normal > 0:
-            rend_normal  = render_pkg['rend_normal']
-            surf_normal = render_pkg['surf_normal']
-            normal_dot = torch.sum(rend_normal * surf_normal, dim=0)
-
-            valid_dot_idxs = torch.where(normal_dot != 0)
-            valid_normal_dot = normal_dot[valid_dot_idxs]
-
-            normal_error = (1 - valid_normal_dot)
-            normal_loss = lambda_normal * normal_error.mean()
-
-        lambda_dist = lambda_dist if iteration > 1000 else 0.0
-        dist_loss = torch.zeros([1], dtype=rgb_loss.dtype).to(rgb_loss.device)
-        if lambda_dist > 0:
-            rend_dist = render_pkg["rend_dist"]
-            valid_dist_idxs = torch.where(rend_dist != 0)
-            valid_rend_dist = rend_dist[valid_dist_idxs]
-            dist_loss = lambda_dist * valid_rend_dist.mean()
-
-        # Phase A: Surface selection — push non-surface to 0 (opacity, scale)；Phase B 开始后彻底关闭
-        opacity_loss = torch.zeros([1], dtype=rgb_loss.dtype).to(rgb_loss.device)
-        if lambda_opacity > 0:
-            opacity_loss = lambda_opacity * nn.MSELoss()(self.gaussians.get_opacity, torch.zeros_like(self.gaussians._opacity))
-
-        scaling_loss = torch.zeros([1], dtype=rgb_loss.dtype).to(rgb_loss.device)
-        if lambda_scaling > 0:
-            scaling_loss = lambda_scaling * nn.MSELoss()(self.gaussians.get_scaling, torch.zeros_like(self.gaussians._scaling))
-
-        # loss
-        total_loss = rgb_loss + dist_loss + normal_loss + opacity_loss + scaling_loss
-
         total_loss.backward()
 
         loss_dict = {
             'reg': reg_loss.item(),
             'ssim': ssim_loss.item(),
             'rgb': rgb_loss.item(),
-            'dist': dist_loss.item(),
-            'normal': normal_loss.item(),
-            'opacity': opacity_loss.item(),
-            'scaling': scaling_loss.item(),
+            'depth_normal': depth_normal_loss.item(),
+            'depth_prior': depth_prior_loss.item(),
+            'mesh': mesh_loss.item(),
+            'mesh_depth': mesh_depth_loss.item(),
+            'mesh_normal': mesh_normal_loss.item(),
+            'occupied_centers': occupied_centers_loss.item(),
+            'occupancy_labels': occupancy_labels_loss.item(),
             'total': total_loss.item(),
         }
 
-        return render_pkg, loss_dict
+        return loss_dict, render_pkg
 
     @torch.no_grad()
-    def recordGrads(self, render_pkg: dict) -> bool:
+    def recordGrads(self, iteration: int, render_pkg: dict) -> bool:
+        viewpoint_cam = self.scene[iteration]
+
         viewspace_point_tensor, visibility_filter, radii = render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
 
+        # Keep track of max radii in image-space for pruning
         self.gaussians.max_radii2D[visibility_filter] = torch.max(self.gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
-        self.gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
+
+        if self.gaussians._culling[:,viewpoint_cam.uid].sum()==0:
+            self.gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
+        else:
+            # normalize xy gradient after culling
+            self.gaussians.add_densification_stats_culling(viewspace_point_tensor, visibility_filter, self.gaussians.factor_culling)
+        return True
+
+    def compute_3D_filter(self) -> bool:
+        if self.gaussians.use_mip_filter:
+            self.gaussians.compute_3D_filter(cameras=self.scene.train_cameras)
+        return True
+
+    def culling(self, iteration: int) -> bool:
+        if self.args.dense_gaussians:
+            self.gaussians.culling_with_importance_pruning(self.scene, render_simp, iteration, self.args, self.pipe, self.background)
+        else:
+            self.gaussians.culling_with_interesction_sampling(self.scene, render_simp, iteration, self.args, self.pipe, self.background)
+        return True
+
+    def update_mask_blur(self, render_pkg: dict) -> bool:
+        image = render_pkg['render']
+        area_max = render_pkg["area_max"]
+        self.mask_blur = torch.logical_or(self.mask_blur, area_max>(image.shape[1]*image.shape[2]/5000))
         return True
 
     @torch.no_grad()
-    def densifyStep(self, render_pkg: dict) -> bool:
-        size_threshold = 20
-        my_viewpoint_stack = self.scene.train_cameras
-        camlist = sampling_cameras(my_viewpoint_stack)
+    def densifyStep(self, iteration: int, render_pkg: dict) -> bool:
+        image, area_max = render_pkg['render'], render_pkg["area_max"]
 
-        # The multiview consistent densification of fastgs
-        importance_score, pruning_score = compute_gaussian_score_fastgs(camlist, self.gaussians, self.pipe, self.background, self.opt, DENSIFY=True)
-        self.gaussians.densify_and_prune_fastgs(
-            max_screen_size = size_threshold,
-            min_opacity = 0.005,
-            extent = self.scene.cameras_extent,
-            radii=render_pkg['radii'],
-            args = self.opt,
-            importance_score = importance_score,
-            pruning_score = pruning_score,
-        )
+        self.mask_blur = torch.logical_or(self.mask_blur, area_max>(image.shape[1]*image.shape[2]/5000))
+
+        if iteration > self.opt.densify_from_iter and iteration % self.opt.densification_interval == 0 and iteration != self.args.depth_reinit_iter:
+            size_threshold = 20 if iteration > self.opt.opacity_reset_interval else None
+            self.gaussians.densify_and_prune_mask(
+                self.opt.densify_grad_threshold, 
+                0.005, self.scene.cameras_extent, 
+                size_threshold, self.mask_blur)
+
+            self.mask_blur = torch.zeros(self.gaussians._xyz.shape[0], device='cuda')
+
+            self.compute_3D_filter()
         return True
 
     @torch.no_grad()
@@ -440,44 +438,93 @@ class Trainer(BaseGSTrainer):
         return True
 
     @torch.no_grad()
-    def resetScaling(self) -> bool:
-        self.gaussians.reset_scaling()
+    def updateGSParams(self, render_pkg: dict) -> bool:
+        if self.gaussians.use_appearance_network:
+            self.gaussians.optimizer.step()
+        else:
+            radii = render_pkg['radii']
+            visible = radii>0
+            self.gaussians.optimizer.step(visible, radii.shape[0])
+        self.gaussians.optimizer.zero_grad(set_to_none = True)
         return True
 
     @torch.no_grad()
-    def updateGSParams(self, iteration: int) -> bool:
-        self.gaussians.optimizer_step(iteration)
+    def logImageStep(
+        self,
+        iteration: int,
+        render_image_num: int=1,
+        is_fast: bool=True,
+    ) -> bool:
+        reg_kick_on = iteration >= self.args.regularization_from_iter
+        mesh_kick_on = iteration >= self.mesh_config["start_iter"]
+
+        print('[INFO][Trainer::logImageStep]')
+        print('\t start log extra images...')
+        for idx in trange(render_image_num):
+            viewpoint = self.scene[idx]
+
+            render_pkg = self.render(viewpoint)
+
+            mesh_regularization_pkg = compute_mesh_regularization(
+                iteration=iteration,
+                render_pkg=render_pkg,
+                viewpoint_cam=viewpoint,
+                viewpoint_idx=idx,
+                gaussians=self.gaussians,
+                scene=self.scene,
+                pipe=self.pipe,
+                background=self.background,
+                kernel_size=0.0,
+                config=self.mesh_config,
+                mesh_renderer=self.mesh_renderer,
+                mesh_state=self.mesh_state,
+                render_func=partial(render, require_coord=False, require_depth=True),
+                weight_adjustment=100. / self.opt.iterations,
+                args=self.args,
+                integrate_func=integrate,
+            )
+            mesh_render_pkg = mesh_regularization_pkg['mesh_render_pkg']
+
+            if not self.is_gt_logged:
+                depth_prior = self.depth_priors[idx]
+                self.logger.summary_writer.add_images("view_{}/depth_prior".format(viewpoint.image_name), depth_prior[None], global_step=iteration)
+
+                depth_prior_normal = (1. - depth_to_normal(viewpoint, depth_prior)) / 2.
+                self.logger.summary_writer.add_images("view_{}/depth_prior_normal".format(viewpoint.image_name), depth_prior_normal[None], global_step=iteration)
+
+            if reg_kick_on or mesh_kick_on or self.depth_order_kick_on:
+                render_depth = render_pkg['median_depth']
+                self.logger.summary_writer.add_images("view_{}/render_depth".format(viewpoint.image_name), render_depth[None], global_step=iteration)
+
+            if reg_kick_on or mesh_kick_on:
+                render_normal = (1. - render_pkg["normal"]) / 2.
+                self.logger.summary_writer.add_images("view_{}/render_normal".format(viewpoint.image_name), render_normal[None], global_step=iteration)
+
+            if mesh_kick_on:
+                mesh_depth = torch.where(
+                    mesh_render_pkg["depth"].detach() > 0,
+                    mesh_render_pkg["depth"].detach(),
+                    mesh_render_pkg["depth"].detach().max().item(),
+                )
+                self.logger.summary_writer.add_images("view_{}/mesh_depth".format(viewpoint.image_name), mesh_depth[None], global_step=iteration)
+
+                mesh_normal = (1. - fix_normal_map(viewpoint, mesh_render_pkg["normals"].detach())) / 2.
+                self.logger.summary_writer.add_images("view_{}/mesh_normal".format(viewpoint.image_name), mesh_normal[None], global_step=iteration)
+ 
+        BaseGSTrainer.logImageStep(
+            self,
+            iteration=iteration,
+            render_image_num=render_image_num,
+            is_fast=is_fast,
+        )
         return True
 
     @torch.no_grad()
     def saveScene(self, iteration: int) -> bool:
-        point_cloud_path = os.path.join(self.dataset.model_path, "point_cloud/iteration_{}".format(iteration))
-        self.gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud.ply"))
+        torch.save((self.gaussians.capture(), iteration), self.scene.model_path + "/chkpnt" + str(iteration) + ".pth")  
         return True
 
     def train(self, iteration_num: int = 30000):
-        # Additional variables
-        iter_start = torch.cuda.Event(enable_timing = True)
-        iter_end = torch.cuda.Event(enable_timing = True)
-        viewpoint_stack = None
-        postfix_dict = {}
-        ema_loss_for_log = 0.0
-        ema_depth_normal_loss_for_log = 0.0
-
-        # ---Prepare Mesh-In-the-Loop Regularization---
-        if self.args.mesh_regularization:
-            print("[INFO] Using mesh regularization.")
-            mesh_renderer, mesh_state = initialize_mesh_regularization(
-                scene=self.scene,
-                config=self.mesh_config,
-            )
-        ema_mesh_depth_loss_for_log = 0.0
-        ema_mesh_normal_loss_for_log = 0.0
-        ema_occupied_centers_loss_for_log = 0.0
-        ema_occupancy_labels_loss_for_log = 0.0
-
-        ema_depth_order_loss_for_log = 0.0
-
         # ---Log optimizable param groups---
         print(f"[INFO] Found {len(self.gaussians.optimizer.param_groups)} optimizable param groups:")
         n_total_params = 0
@@ -501,9 +548,7 @@ class Trainer(BaseGSTrainer):
         for _ in range(iteration_num):
             iteration += 1
 
-            viewpoint_cam = self.scene[iteration]
-
-            render_pkg, loss_dict = self.trainStep(iteration, viewpoint_cam)
+            loss_dict, render_pkg = self.trainStep(iteration)
 
             if iteration % 10 == 0:
                 bar_loss_dict = {
@@ -515,70 +560,98 @@ class Trainer(BaseGSTrainer):
                 progress_bar.set_postfix(bar_loss_dict)
                 progress_bar.update(10)
 
-            self.logStep(iteration, loss_dict, is_fast=True)
+            self.logStep(iteration, loss_dict)
 
+            if iteration % self.test_freq == 0:
+                self.logImageStep(
+                    iteration,
+                    render_image_num=1,
+                    is_fast=True,
+                )
+
+            # ---Densification---
+            gaussians_have_changed = False
+            if iteration < self.opt.densify_until_iter:
+                self.recordGrads(iteration, render_pkg)
+
+                self.update_mask_blur(render_pkg)
+
+                if iteration > self.opt.densify_from_iter and iteration % self.opt.densification_interval == 0 and iteration != self.args.depth_reinit_iter:
+                    self.densifyStep(iteration, render_pkg)
+                    gaussians_have_changed = True
+
+                if iteration == self.args.depth_reinit_iter:
+                    num_depth = self.gaussians._xyz.shape[0]*self.args.num_depth_factor
+
+                    # interesction_preserving for better point cloud reconstruction result at the early stage, not affect rendering quality
+                    self.gaussians.interesction_preserving(self.scene, render_simp, iteration, self.args, self.pipe, self.background)
+                    self.compute_3D_filter()
+
+                    pts, rgb = self.gaussians.depth_reinit(self.scene, render_depth, iteration, num_depth, self.args, self.pipe, self.background)
+
+                    self.gaussians.reinitial_pts(pts, rgb)
+
+                    self.gaussians.training_setup(self.opt)
+                    self.gaussians.init_culling(len(self.scene))
+
+                    self.mask_blur = torch.zeros(self.gaussians._xyz.shape[0], device='cuda')
+                    torch.cuda.empty_cache()
+                    gaussians_have_changed = True
+                    self.compute_3D_filter()
+
+                if iteration >= self.args.aggressive_clone_from_iter and iteration % self.args.aggressive_clone_interval == 0 and iteration!=self.args.depth_reinit_iter:
+                    self.gaussians.culling_with_clone(self.scene, render_simp, iteration, self.args, self.pipe, self.background)
+                    torch.cuda.empty_cache()
+
+                    self.mask_blur = torch.zeros(self.gaussians._xyz.shape[0], device='cuda')
+                    gaussians_have_changed = True
+                    self.compute_3D_filter()
+
+            # ---Pruning and simplification---
+            if iteration == self.args.simp_iteration1:
+                self.culling(iteration)
+
+                self.gaussians.max_sh_degree=self.dataset.sh_degree
+                self.gaussians.extend_features_rest()
+
+                self.gaussians.training_setup(self.opt)
+                torch.cuda.empty_cache()
+                gaussians_have_changed = True
+                self.compute_3D_filter()
+
+            if iteration == self.args.simp_iteration2:
+                self.culling(iteration)
+                torch.cuda.empty_cache()
+                gaussians_have_changed = True
+                self.compute_3D_filter()
+
+            if iteration == (self.args.simp_iteration2+self.opt.iterations)//2:
+                self.gaussians.init_culling(len(self.scene))
+
+            # ---Reset mesh state if Gaussians have changed---
+            mesh_kick_on = iteration >= self.mesh_config["start_iter"]
+            if mesh_kick_on and gaussians_have_changed:
+                self.mesh_state = reset_mesh_state_at_next_iteration(self.mesh_state)
+
+            # ---Update 3D Mip Filter---
+            if self.gaussians.use_mip_filter and (
+                (iteration == self.args.warn_until_iter)
+                or (iteration % self.args.update_mip_filter_every == 0)
+            ):
+                if iteration < self.opt.iterations - self.args.update_mip_filter_every:
+                    self.compute_3D_filter()
+                else:
+                    print(f"[INFO] Skipping 3D Mip Filter update at iteration {iteration}")
+
+            # ---Optimizer step---
+            self.updateGSParams(render_pkg)
+
+            # ---Save checkpoint---
             if iteration % self.save_freq == 0:
-                print("\n[ITER {}] Saving Gaussians".format(iteration))
+                print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 self.saveScene(iteration)
 
-            # Densification
-            if iteration < self.opt.densify_until_iter:
-                self.recordGrads(render_pkg)
-                if iteration > self.opt.densify_from_iter and iteration % self.opt.densification_interval == 0:
-                    self.densifyStep(render_pkg)
-
-                if iteration % self.opt.opacity_reset_interval == 0 or (self.dataset.white_background and iteration == self.opt.densify_from_iter):
-                    self.resetOpacity()
-
-                if iteration % self.opt.scaling_reset_interval == 0 or (self.dataset.white_background and iteration == self.opt.densify_from_iter):
-                    self.resetScaling()
-
-            # The multiview consistent pruning of fastgs. We do it every 3k iterations after 15k
-            # In this stage, the model converge basically. So we can prune more aggressively without degrading rendering quality.
-            # You can check the rendering results of 20K iterations in arxiv version (https://arxiv.org/abs/2511.04283), the rendering quality is already very good.
-            if iteration % 3000 == 0 and iteration > 15_000 and iteration < 30_000:
-                self.finalPrune()
-
-            # 每个 step 删除不在任一 mask 内的 gaussian
-            # self.pruneGaussiansOutsideMasks()
-
-            self.updateGSParams(iteration)
-
-            self.iteration = iteration
-        return True
-
-    def exportMesh(
-        self,
-        mesh_res: int = 1024,
-        voxel_size: float = -1.0,
-        depth_trunc: float = -1.0,
-        sdf_trunc: float = -1.0,
-        num_cluster: int = 50,
-    ) -> bool:
-        export_scene = deepcopy(self.scene)
-        export_gaussians = export_scene.gaussians
-
-        train_dir = os.path.join(self.dataset.model_path, 'mesh', 'iter_' + str(self.iteration))
-        gaussExtractor = GaussianExtractor(export_gaussians, render, self.pipe, bg_color=self.background.cpu().numpy())
-
-        print('[INFO][Trainer::exportMesh]')
-        print("\t start export mesh...")
-        os.makedirs(train_dir, exist_ok=True)
-        # set the active_sh to 0 to export only diffuse texture
-        gaussExtractor.gaussians.active_sh_degree = 0
-        gaussExtractor.reconstruction(export_scene.train_cameras)
-
-        # extract the mesh and save
-        name = 'fuse.ply'
-        depth_trunc = (gaussExtractor.radius * 2.0) if depth_trunc < 0  else depth_trunc
-        voxel_size = (depth_trunc / mesh_res) if voxel_size < 0 else voxel_size
-        sdf_trunc = 5.0 * voxel_size if sdf_trunc < 0 else sdf_trunc
-        mesh = gaussExtractor.extract_mesh_bounded(voxel_size=voxel_size, sdf_trunc=sdf_trunc, depth_trunc=depth_trunc)
-
-        o3d.io.write_triangle_mesh(os.path.join(train_dir, name), mesh)
-        print("mesh saved at {}".format(os.path.join(train_dir, name)))
-        # post-process the mesh and save, saving the largest N clusters
-        mesh_post = post_process_mesh(mesh, cluster_to_keep=num_cluster)
-        o3d.io.write_triangle_mesh(os.path.join(train_dir, name.replace('.ply', '_post.ply')), mesh_post)
-        print("mesh post processed saved at {}".format(os.path.join(train_dir, name.replace('.ply', '_post.ply'))))
+        if iteration % 100 == 0:
+            torch.cuda.empty_cache()
+            gc.collect()
         return True

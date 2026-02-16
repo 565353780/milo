@@ -100,24 +100,6 @@ def render_gof(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tens
     rendered_normal = rendering[3:6, :, :]
     rendered_normal = torch.nn.functional.normalize(rendered_normal, p=2, dim=0)
     rendered_alpha = rendering[7:8, :, :]
-    
-    ##########################################
-    if False:
-        gaussians_depth = transform_points_world_to_view(pc.get_xyz[None], [viewpoint_camera])[0][..., 2:3]
-        colors_bis = torch.cat([gaussians_depth, torch.ones(len(gaussians_depth), 2, device=gaussians_depth.device)], dim=-1)
-        rendered_expected_depth = rasterizer(
-            means3D = means3D,
-            means2D = means2D,
-            shs = None,
-            colors_precomp = colors_bis,
-            opacities = opacity,
-            scales = scales,
-            rotations = rotations,
-            cov3D_precomp = cov3D_precomp,
-            view2gaussian_precomp=None
-        )[0][0:1]  # / rendered_alpha.detach()
-        # rendered_expected_depth = torch.nan_to_num(rendered_expected_depth, 0., 0.)
-    ##########################################
 
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
     # They will be excluded from value updates used in the splitting criteria.
