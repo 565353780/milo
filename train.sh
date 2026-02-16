@@ -8,7 +8,7 @@ CUDA_VISIBLE_DEVICES=3 \
   python train.py \
   -s ${DATA_FOLDER}/colmap_normalized/ \
   -m ${DATA_FOLDER}/milo/ \
-  --images masked_images \
+  --images images \
   -r 1 \
   --imp_metric "indoor" \
   --rasterizer "radegs" \
@@ -20,6 +20,6 @@ CUDA_VISIBLE_DEVICES=3 \
   python mesh_extract_sdf.py \
   -s ${DATA_FOLDER}/colmap_normalized/ \
   -m ${DATA_FOLDER}/milo/ \
-  --images masked_images \
+  --images images \
   -r 1 \
-  --rasterizer "radegs"
+  --rasterizer "gof"
