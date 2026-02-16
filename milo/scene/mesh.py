@@ -1,7 +1,8 @@
-from typing import List, Union, Tuple, Optional
 import torch
 import nvdiffrast.torch as dr
+
 from scene.cameras import Camera
+from typing import List, Union, Optional
 from utils.geometry_utils import transform_points_world_to_view
 
 

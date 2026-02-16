@@ -1,6 +1,7 @@
 import numpy as np
 from scipy.spatial.transform import Rotation
 
+
 def get_interpolate_render_path(c2ws, N_views=30):
     N = len(c2ws)
     rotvec, positions = [], []

@@ -1,38 +1,29 @@
-#
-# Copyright (C) 2023, Inria
-# GRAPHDECO research group, https://team.inria.fr/graphdeco
-# All rights reserved.
-#
-# This software is free for non-commercial, research and evaluation use 
-# under the terms of the LICENSE.md file.
-#
-# For inquiries contact  george.drettakis@inria.fr
-#
-
-import torch
-import math
-import numpy as np
-from utils.general_utils import inverse_sigmoid, get_expon_lr_func, build_rotation
-from torch import nn
 import os
-from utils.system_utils import mkdir_p
+import math
+import torch
+import trimesh
+import numpy as np
+
+from torch import nn
+from torch.optim import Adam
 from plyfile import PlyData, PlyElement
-from utils.sh_utils import RGB2SH
+
 from simple_knn._C import distCUDA2
-from utils.graphics_utils import BasicPointCloud
+
+from base_gs_trainer.Data.basic_point_cloud import BasicPointCloud
+
+from diff_gaussian_rasterization_ms import SparseGaussianAdam
+
+from utils.sh_utils import RGB2SH
+from utils.general_utils import inverse_sigmoid, get_expon_lr_func, build_rotation
+
+from utils.sh_utils import SH2RGB
 from utils.general_utils import strip_symmetric, build_scaling_rotation
 from scene.appearance_network import AppearanceNetwork
-from utils.sh_utils import SH2RGB
-import trimesh
 
-try:
-    from diff_gaussian_rasterization_ms import SparseGaussianAdam
-except:
-    pass
-from torch.optim import Adam
 
 def init_cdf_mask(importance, thres=1.0):
-    importance = importance.flatten()   
+    importance = importance.flatten()
     if thres!=1.0:
         percent_sum = thres
         vals,idx = torch.sort(importance+(1e-6))
@@ -41,9 +32,9 @@ def init_cdf_mask(importance, thres=1.0):
         split_val_nonprune = vals[split_index]
 
         non_prune_mask = importance>split_val_nonprune 
-    else: 
+    else:
         non_prune_mask = torch.ones_like(importance).bool()
-        
+
     return non_prune_mask
 
 
@@ -55,7 +46,7 @@ class GaussianModel:
             actual_covariance = L @ L.transpose(1, 2)
             symm = strip_symmetric(actual_covariance)
             return symm
-        
+
         self.scaling_activation = torch.exp
         self.scaling_inverse_activation = torch.log
 
@@ -69,13 +60,13 @@ class GaussianModel:
 
     def __init__(
         self, sh_degree : int, 
-        use_mip_filter : bool = False, 
+        use_mip_filter : bool = False,
         learn_occupancy : bool = False,
         use_radegs_densification : bool = False,
         use_appearance_network : bool = False,
     ):
         self.active_sh_degree = 0
-        self.max_sh_degree = sh_degree  
+        self.max_sh_degree = sh_degree
         self._xyz = torch.empty(0)
         self._features_dc = torch.empty(0)
         self._features_rest = torch.empty(0)
@@ -89,18 +80,18 @@ class GaussianModel:
         self.percent_dense = 0
         self.spatial_lr_scale = 0
         self.setup_functions()
-        
+
         self.use_appearance_network = use_appearance_network
         if use_appearance_network:
-            self.appearance_network = AppearanceNetwork(3+64, 3).cuda()        
+            self.appearance_network = AppearanceNetwork(3+64, 3).cuda()
             self._appearance_embeddings = nn.Parameter(torch.empty(2048, 64).cuda())
             self._appearance_embeddings.data.normal_(0, 1e-4)
-        
+
         self.use_mip_filter = use_mip_filter
-        
+
         # SDF values are actually learned as occupancies between 0 and 1.
         # Occupancies can be converted to truncated SDF values between -1 and 1 with an affine transformation.
-        # During training, the base values of occupancies are initialized using depth fusion; 
+        # During training, the base values of occupancies are initialized using depth fusion;
         # They are not learned but are periodically reset at the beginning of the training.
         # We learn an occupancy shift added to the base occupancies and initialized to 0.
         self.learn_occupancy = learn_occupancy
@@ -108,7 +99,7 @@ class GaussianModel:
         if learn_occupancy:
             self._base_occupancy = torch.empty(0)
             self._occupancy_shift = torch.empty(0)
-        
+
         self.use_radegs_densification = use_radegs_densification
         if self.use_radegs_densification:
             self.xyz_gradient_accum_abs = torch.empty(0)
@@ -134,7 +125,7 @@ class GaussianModel:
         if self.use_appearance_network:
             to_return += (self.appearance_network.state_dict(), self._appearance_embeddings,)
         return to_return
-    
+
     def restore(self, model_args, training_args):
         start_idx = 12
         (self.active_sh_degree, 
@@ -605,7 +596,7 @@ class GaussianModel:
         return l
 
     def save_ply(self, path):
-        mkdir_p(os.path.dirname(path))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
 
         xyz = self._xyz.detach().cpu().numpy()
         normals = np.zeros_like(xyz)

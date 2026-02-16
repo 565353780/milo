@@ -6,7 +6,7 @@ import math
 import matplotlib.pyplot as plt
 from utils.geometry_utils import depth_to_normal
 from utils.image_utils import psnr
-from utils.loss_utils import l1_loss, ssim, L1_loss_appearance
+from utils.loss_utils import l1_loss, ssim
 from lpipsPyTorch import lpips
 
 

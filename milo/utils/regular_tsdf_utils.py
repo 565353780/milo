@@ -1,19 +1,9 @@
-#
-# Copyright (C) 2024, ShanghaiTech
-# SVIP research group, https://github.com/svip-lab
-# All rights reserved.
-#
-# This software is free for non-commercial, research and evaluation use 
-# under the terms of the LICENSE.md file.
-#
-# For inquiries contact  huangbb@shanghaitech.edu.cn
-#
-
 import torch
 import numpy as np
+import open3d as o3d
+
 from tqdm import tqdm
 from functools import partial
-import open3d as o3d
 
 
 def focus_point_fn(poses: np.ndarray) -> np.ndarray:

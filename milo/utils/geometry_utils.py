@@ -225,8 +225,8 @@ def unflatten_voronoi_features(voronoi_features:torch.Tensor, n_voronoi_per_gaus
         ],
         dim=1
     ).reshape(n_gaussians, n_voronoi_per_gaussians, *voronoi_features.shape[1:])
-    
-    
+
+
 def flatten_voronoi_features(voronoi_features:torch.Tensor, n_voronoi_per_gaussians:int=9):
     return torch.cat(
         [
@@ -240,10 +240,10 @@ def flatten_voronoi_features(voronoi_features:torch.Tensor, n_voronoi_per_gaussi
 def identify_out_of_field_points(
     points:torch.Tensor,
     views:List[Camera],
-):  
+):
     n_points = points.shape[0]
     out_of_field_mask = torch.ones_like(points[:, 0], dtype=torch.bool, device=points.device)
-    
+
     for camera in tqdm(views, desc="Identifying out of field points"):
         H, W = camera.image_height, camera.image_width
 
@@ -252,7 +252,7 @@ def identify_out_of_field_points(
             points=points.view(1, n_points, 3),
             cameras=[camera],
         )[0]  # (N, 3)
-        
+
         # Project points to pixel space
         pix_points = transform_points_to_pixel_space(
             points=view_points.view(1, n_points, 3),
