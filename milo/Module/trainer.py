@@ -14,7 +14,7 @@ from fused_ssim import fused_ssim
 from base_gs_trainer.Loss.l1 import l1_loss
 from base_gs_trainer.Module.base_gs_trainer import BaseGSTrainer
 
-from gaussian_renderer import render_imp, render_simp, render_depth, render_full
+from gaussian_renderer import render_simp, render_depth, render_full
 
 from utils.log_utils import fix_normal_map
 from utils.geometry_utils import depth_to_normal
@@ -158,19 +158,19 @@ class Trainer(BaseGSTrainer):
             depth = camera._cam.depth.detach().clone()
             self.depth_priors.append(depth)
 
-        # ---Prepare Mesh-In-the-Loop Regularization---
-        if self.args.mesh_regularization:
-            print("[INFO] Using mesh regularization.")
-            self.mesh_renderer, self.mesh_state = initialize_mesh_regularization(
-                scene=self.scene,
-                config=self.mesh_config,
-            )
-
         # Get mesh regularization config file
         mesh_config_file = os.path.join(BASE_DIR, "configs", "mesh", f"{args.mesh_config}.yaml")
         with open(mesh_config_file, "r") as f:
             self.mesh_config = yaml.safe_load(f)
         print(f"[INFO] Using mesh regularization with config: {args.mesh_config}")
+
+        # ---Prepare Mesh-In-the-Loop Regularization---
+        if args.mesh_regularization:
+            print("[INFO] Using mesh regularization.")
+            self.mesh_renderer, self.mesh_state = initialize_mesh_regularization(
+                scene=self.scene,
+                config=self.mesh_config,
+            )
 
         # Message for imp_metric
         print(f"[INFO] Using importance metric: {args.imp_metric}.")
@@ -191,9 +191,9 @@ class Trainer(BaseGSTrainer):
         self.depth_order_kick_on = True
         return
 
-    def renderImage(self, viewpoint_cam) -> dict:
+    def renderImage(self, viewpoint_idx: int) -> dict:
         return render(
-            viewpoint_cam,
+            self.scene[viewpoint_idx],
             self.gaussians,
             self.pipe,
             self.background,
@@ -201,25 +201,17 @@ class Trainer(BaseGSTrainer):
             require_depth=True,
         )
 
-    def render_full(self, viewpoint_cam) -> dict:
+    def render_full(self, viewpoint_idx) -> dict:
+        camera_idx = viewpoint_idx % len(self.scene)
         return render_full(
-            viewpoint_cam,
+            self.scene[viewpoint_idx],
             self.gaussians,
             self.pipe,
             self.background,
-            culling=self.gaussians._culling[:,viewpoint_cam.uid],
+            culling=self.gaussians._culling[:, camera_idx],
             compute_expected_normals=False,
             compute_expected_depth=True,
             compute_accurate_median_depth_gradient=True,
-        )
-
-    def render_imp(self, viewpoint_cam) -> dict:
-        return render_imp(
-            viewpoint_cam,
-            self.gaussians,
-            self.pipe,
-            self.background,
-            culling=self.gaussians._culling[:,viewpoint_cam.uid],
         )
 
     def trainStep(
@@ -233,7 +225,7 @@ class Trainer(BaseGSTrainer):
 
         viewpoint_idx = iteration % len(self.scene)
 
-        viewpoint_cam = self.scene(viewpoint_idx)
+        viewpoint_cam = self.scene[viewpoint_idx]
         depth_prior = self.depth_priors[viewpoint_idx]
 
         reg_kick_on = iteration >= self.args.regularization_from_iter
@@ -242,12 +234,12 @@ class Trainer(BaseGSTrainer):
         # If depth-normal regularization or mesh-in-the-loop regularization are active,
         # we use the rasterizer compatible with depth and normal rendering.
         if reg_kick_on or mesh_kick_on:
-            render_pkg = self.renderImage(viewpoint_cam)
+            render_pkg = self.renderImage(viewpoint_idx)
 
         # Else, if depth-order regularization is active, we use Mini-Splatting2 rasterizer 
         # but we render depth maps. This rasterizer is necessary for densification and simplification.
         else:
-            render_pkg = self.render_full(viewpoint_cam)
+            render_pkg = self.render_full(viewpoint_idx)
 
         image, viewspace_point_tensor, visibility_filter, radii = (
             render_pkg["render"], render_pkg["viewspace_points"], 
@@ -257,7 +249,7 @@ class Trainer(BaseGSTrainer):
 
         # Rendering loss
         if self.args.decoupled_appearance:
-            reg_loss = L1_loss_appearance(image, gt_image, self.gaussians, viewpoint_cam.uid)
+            reg_loss = L1_loss_appearance(image, gt_image, self.gaussians, viewpoint_idx)
         else:
             reg_loss = l1_loss(image, gt_image)
 
@@ -371,14 +363,14 @@ class Trainer(BaseGSTrainer):
 
     @torch.no_grad()
     def recordGrads(self, iteration: int, render_pkg: dict) -> bool:
-        viewpoint_cam = self.scene[iteration]
+        camera_idx = iteration % len(self.scene)
 
         viewspace_point_tensor, visibility_filter, radii = render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
 
         # Keep track of max radii in image-space for pruning
         self.gaussians.max_radii2D[visibility_filter] = torch.max(self.gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
 
-        if self.gaussians._culling[:,viewpoint_cam.uid].sum()==0:
+        if self.gaussians._culling[:, camera_idx].sum()==0:
             self.gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
         else:
             # normalize xy gradient after culling
@@ -452,27 +444,7 @@ class Trainer(BaseGSTrainer):
         for idx in trange(render_image_num):
             viewpoint = self.scene[idx]
 
-            render_pkg = self.render(viewpoint)
-
-            mesh_regularization_pkg = compute_mesh_regularization(
-                iteration=iteration,
-                render_pkg=render_pkg,
-                viewpoint_cam=viewpoint,
-                viewpoint_idx=idx,
-                gaussians=self.gaussians,
-                scene=self.scene,
-                pipe=self.pipe,
-                background=self.background,
-                kernel_size=0.0,
-                config=self.mesh_config,
-                mesh_renderer=self.mesh_renderer,
-                mesh_state=self.mesh_state,
-                render_func=partial(render, require_coord=False, require_depth=True),
-                weight_adjustment=100. / self.opt.iterations,
-                args=self.args,
-                integrate_func=integrate,
-            )
-            mesh_render_pkg = mesh_regularization_pkg['mesh_render_pkg']
+            render_pkg = self.renderImage(idx)
 
             if not self.is_gt_logged:
                 depth_prior = self.depth_priors[idx]
@@ -490,6 +462,26 @@ class Trainer(BaseGSTrainer):
                 self.logger.summary_writer.add_images("view_{}/render_normal".format(viewpoint.image_name), render_normal[None], global_step=iteration)
 
             if mesh_kick_on:
+                mesh_regularization_pkg = compute_mesh_regularization(
+                    iteration=iteration,
+                    render_pkg=render_pkg,
+                    viewpoint_cam=viewpoint,
+                    viewpoint_idx=idx,
+                    gaussians=self.gaussians,
+                    scene=self.scene,
+                    pipe=self.pipe,
+                    background=self.background,
+                    kernel_size=0.0,
+                    config=self.mesh_config,
+                    mesh_renderer=self.mesh_renderer,
+                    mesh_state=self.mesh_state,
+                    render_func=partial(render, require_coord=False, require_depth=True),
+                    weight_adjustment=100. / self.opt.iterations,
+                    args=self.args,
+                    integrate_func=integrate,
+                )
+                mesh_render_pkg = mesh_regularization_pkg['mesh_render_pkg']
+
                 mesh_depth = torch.where(
                     mesh_render_pkg["depth"].detach() > 0,
                     mesh_render_pkg["depth"].detach(),
@@ -542,8 +534,6 @@ class Trainer(BaseGSTrainer):
             if iteration % 10 == 0:
                 bar_loss_dict = {
                     "rgb": f"{loss_dict['rgb']:.{5}f}",
-                    "distort": f"{loss_dict['dist']:.{5}f}",
-                    "normal": f"{loss_dict['normal']:.{5}f}",
                     "Points": f"{len(self.gaussians.get_xyz)}"
                 }
                 progress_bar.set_postfix(bar_loss_dict)

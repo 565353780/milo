@@ -10,6 +10,8 @@ class ModelParams(BaseModelParams, ParamGroup):
     def __init__(self, parser, sentinel=False):
         BaseModelParams.__init__(self)
 
+        self._images = "images"
+
         self.llff = 8
         self.kernel_size = 0.0  # Added
 

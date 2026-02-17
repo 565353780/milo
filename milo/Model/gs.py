@@ -1086,11 +1086,11 @@ class GaussianModel:
 
             N_xyz=prob.shape[0]
             num_sampled=int(N_xyz*factor)
-            
+
             # print("N_xyz:", N_xyz)
             # print("num_sampled:", num_sampled)
             # print("p>0:", (prob>0).sum())
-            
+
             nonzero_prob = (prob>0).sum()
             if nonzero_prob >= num_sampled:
                 indices = np.random.choice(N_xyz, size=num_sampled, 
@@ -1098,19 +1098,18 @@ class GaussianModel:
             else:
                 print("[WARNING] Not enough points to sample from in depth reinit!")
                 indices = np.arange(N_xyz)[prob>0]
-            
+
             out_pts = out_pts.permute(1,2,0).reshape(-1,3)
             gt = gt.permute(1,2,0).reshape(-1,3)
 
             out_pts_list.append(out_pts[indices])
-            gt_list.append(gt[indices])       
+            gt_list.append(gt[indices])
 
 
         out_pts_merged=torch.cat(out_pts_list)
         gt_merged=torch.cat(gt_list)
 
         return out_pts_merged, gt_merged
-    
 
     def interesction_sampling(self, scene, render_simp, iteration, args, pipe, background):
 
