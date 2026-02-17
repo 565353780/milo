@@ -2,13 +2,6 @@ import os
 import gc
 import sys
 import yaml
-BASE_DIR = os.path.dirname(os.path.abspath(__file__)) + '/../..'
-ROOT_DIR = os.path.abspath(os.path.join(BASE_DIR, '..'))
-SUBMODULES_DIR = os.path.join(ROOT_DIR, 'submodules')
-sys.path.append(ROOT_DIR)
-sys.path.append(SUBMODULES_DIR)
-sys.path.append(os.path.join(SUBMODULES_DIR, 'Depth-Anything-V2'))
-
 import torch
 
 from typing import Tuple
@@ -149,6 +142,8 @@ class Trainer(BaseGSTrainer):
             test_freq=test_freq,
             save_freq=save_freq,
         )
+
+        BASE_DIR = os.path.dirname(os.path.abspath(__file__)) + '/../..'
 
         # Get depth order config file
         depth_order_config_file = os.path.join(BASE_DIR, "configs", "depth_order", f"{args.depth_order_config}.yaml")

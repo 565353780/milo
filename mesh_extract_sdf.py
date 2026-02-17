@@ -573,19 +573,19 @@ if __name__ == "__main__":
     parser.add_argument("--sdf_reset_linearization_n_steps", default=20, type=int)
     args = get_combined_args(parser)
     print("Rendering " + args.model_path)
-    
+
     random.seed(0)
     np.random.seed(0)
     torch.manual_seed(0)
     torch.cuda.set_device(torch.device("cuda:0"))
-    
+
     # Get mesh regularization config file
     print(f"[INFO] Loading mesh regularization config from {args.config}")
     mesh_config_file = os.path.join(BASE_DIR, "configs", "mesh", f"{args.config}.yaml")
     with open(mesh_config_file, "r") as f:
         mesh_config = yaml.safe_load(f)
     mesh_config["reset_occupancy_labels_every"] = args.reset_occupancy_labels_every
-    
+
     # Rasterization
     print(f"[INFO] Using {args.rasterizer} as rasterizer.")
     if args.rasterizer == "radegs":
@@ -596,11 +596,11 @@ if __name__ == "__main__":
         from gaussian_renderer.gof import integrate_gof as integrate
     else:
         raise ValueError(f"Invalid rasterizer: {args.rasterizer}")
-    
+
     if args.n_delaunay_sites > 0:
         if args.imp_metric == 'none':
             raise ValueError("imp_metric must be specified for using delaunay downsampling: Either 'indoor' or 'outdoor'")
-    
+
     extract_mesh_with_sdf_refinement(
         model.extract(args), 
         args.iteration, 
