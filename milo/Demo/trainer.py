@@ -8,7 +8,7 @@ os.environ['CUDA_VISIBLE_DEVICES']='3'
 
 from base_gs_trainer.Method.time import getCurrentTime
 
-from twod_gs.Module.trainer import Trainer
+from milo.Module.trainer import Trainer
 
 
 def demo():
@@ -16,7 +16,7 @@ def demo():
 
     home = os.environ['HOME']
     colmap_data_folder_path = home + '/chLi/Dataset/GS/' + data_id + '/colmap_normalized/'
-    save_result_folder_path = home + '/chLi/Dataset/GS/' + data_id + '/2dgs/'
+    save_result_folder_path = home + '/chLi/Dataset/GS/' + data_id + '/milo/'
 
     trainer = Trainer(
         colmap_data_folder_path=colmap_data_folder_path,
@@ -27,5 +27,4 @@ def demo():
         save_freq=500,
     )
     trainer.train(30000)
-    # trainer.exportMesh()
     return True

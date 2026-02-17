@@ -11,14 +11,18 @@ from plyfile import PlyData, PlyElement
 from simple_knn._C import distCUDA2
 
 from base_gs_trainer.Data.basic_point_cloud import BasicPointCloud
+from base_gs_trainer.Method.sh_utils import RGB2SH, SH2RGB
 
 from diff_gaussian_rasterization_ms import SparseGaussianAdam
 
-from utils.sh_utils import RGB2SH
-from utils.general_utils import inverse_sigmoid, get_expon_lr_func, build_rotation
+from utils.general_utils import (
+    inverse_sigmoid,
+    get_expon_lr_func,
+    build_rotation,
+    strip_symmetric,
+    build_scaling_rotation,
+)
 
-from utils.sh_utils import SH2RGB
-from utils.general_utils import strip_symmetric, build_scaling_rotation
 from scene.appearance_network import AppearanceNetwork
 
 

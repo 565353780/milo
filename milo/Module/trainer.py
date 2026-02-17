@@ -2,7 +2,7 @@ import os
 import gc
 import sys
 import yaml
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = os.path.dirname(os.path.abspath(__file__)) + '/../..'
 ROOT_DIR = os.path.abspath(os.path.join(BASE_DIR, '..'))
 SUBMODULES_DIR = os.path.join(ROOT_DIR, 'submodules')
 sys.path.append(ROOT_DIR)
@@ -49,10 +49,7 @@ else:
     print('rasterizer must in [radegs, gof]!')
     exit()
 
-
-
 from milo.Config.config import ModelParams, PipelineParams, OptimizationParams
-from milo.Method.render_kernel import render
 from milo.Model.gs import GaussianModel
 
 
@@ -84,7 +81,6 @@ class Trainer(BaseGSTrainer):
         # ----- Densification and Simplification -----
         # > Inspired by Mini-Splatting2.
         # > Used for pruning, densification and Gaussian pivots selection.
-        parser.add_argument("--imp_metric", required=True, type=str, choices=["outdoor", "indoor"])
         parser.add_argument("--config_path", type=str, default="./configs/fast")
         # Aggressive Cloning
         parser.add_argument("--aggressive_clone_from_iter", type=int, default = 500)
@@ -127,38 +123,7 @@ class Trainer(BaseGSTrainer):
         args.model_path = save_result_folder_path
 
         args.mesh_regularization = not args.no_mesh_regularization
-
-        # Get depth order config file
-        depth_order_config_file = os.path.join(BASE_DIR, "configs", "depth_order", f"{args.depth_order_config}.yaml")
-        with open(depth_order_config_file, "r") as f:
-            self.depth_order_config = yaml.safe_load(f)
-
-        # ---Prepare Depth-Order Regularization---    
-        print("[INFO] Using depth order regularization.")
-        print(f"        > Using expected depth with depth_ratio {self.depth_order_config['depth_ratio']} for depth order regularization.")
-        self.depth_priors = initialize_depth_order_supervision(
-            scene=self.scene,
-            config=self.depth_order_config,
-            device='cuda',
-        )
-
-        # ---Prepare Mesh-In-the-Loop Regularization---
-        if self.args.mesh_regularization:
-            print("[INFO] Using mesh regularization.")
-            self.mesh_renderer, self.mesh_state = initialize_mesh_regularization(
-                scene=self.scene,
-                config=self.mesh_config,
-            )
-
-
-        # Get mesh regularization config file
-        mesh_config_file = os.path.join(BASE_DIR, "configs", "mesh", f"{args.mesh_config}.yaml")
-        with open(mesh_config_file, "r") as f:
-            self.mesh_config = yaml.safe_load(f)
-        print(f"[INFO] Using mesh regularization with config: {args.mesh_config}")
-
-        # Message for imp_metric
-        print(f"[INFO] Using importance metric: {args.imp_metric}.")
+        args.imp_metric = 'indoor'
 
         print("Optimizing " + args.model_path)
 
@@ -185,6 +150,35 @@ class Trainer(BaseGSTrainer):
             save_freq=save_freq,
         )
 
+        # Get depth order config file
+        depth_order_config_file = os.path.join(BASE_DIR, "configs", "depth_order", f"{args.depth_order_config}.yaml")
+        with open(depth_order_config_file, "r") as f:
+            self.depth_order_config = yaml.safe_load(f)
+
+        # ---Prepare Depth-Order Regularization---    
+        print("[INFO] Using depth order regularization.")
+        print(f"        > Using expected depth with depth_ratio {self.depth_order_config['depth_ratio']} for depth order regularization.")
+        self.depth_priors = []
+        for camera in self.scene.train_cameras:
+            depth = camera._cam.depth.detach().clone()
+            self.depth_priors.append(depth)
+
+        # ---Prepare Mesh-In-the-Loop Regularization---
+        if self.args.mesh_regularization:
+            print("[INFO] Using mesh regularization.")
+            self.mesh_renderer, self.mesh_state = initialize_mesh_regularization(
+                scene=self.scene,
+                config=self.mesh_config,
+            )
+
+        # Get mesh regularization config file
+        mesh_config_file = os.path.join(BASE_DIR, "configs", "mesh", f"{args.mesh_config}.yaml")
+        with open(mesh_config_file, "r") as f:
+            self.mesh_config = yaml.safe_load(f)
+        print(f"[INFO] Using mesh regularization with config: {args.mesh_config}")
+
+        # Message for imp_metric
+        print(f"[INFO] Using importance metric: {args.imp_metric}.")
         print(f"[INFO] Using 3D Mip Filter: {self.gaussians.use_mip_filter}")
         print(f"[INFO] Using learnable SDF: {self.gaussians.learn_occupancy}")
 
@@ -202,7 +196,7 @@ class Trainer(BaseGSTrainer):
         self.depth_order_kick_on = True
         return
 
-    def render(self, viewpoint_cam) -> dict:
+    def renderImage(self, viewpoint_cam) -> dict:
         return render(
             viewpoint_cam,
             self.gaussians,
@@ -253,7 +247,7 @@ class Trainer(BaseGSTrainer):
         # If depth-normal regularization or mesh-in-the-loop regularization are active,
         # we use the rasterizer compatible with depth and normal rendering.
         if reg_kick_on or mesh_kick_on:
-            render_pkg = self.render(viewpoint_cam)
+            render_pkg = self.renderImage(viewpoint_cam)
 
         # Else, if depth-order regularization is active, we use Mini-Splatting2 rasterizer 
         # but we render depth maps. This rasterizer is necessary for densification and simplification.
