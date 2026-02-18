@@ -3,7 +3,9 @@ import gc
 import sys
 import yaml
 import torch
+import torch.nn.functional as F
 
+from copy import deepcopy
 from typing import Tuple
 from functools import partial
 from tqdm import tqdm, trange
@@ -11,6 +13,7 @@ from argparse import ArgumentParser
 
 from fused_ssim import fused_ssim
 
+from base_gs_trainer.Data.gs_camera import GSCamera
 from base_gs_trainer.Loss.l1 import l1_loss
 from base_gs_trainer.Module.base_gs_trainer import BaseGSTrainer
 
@@ -154,9 +157,20 @@ class Trainer(BaseGSTrainer):
         print("[INFO] Using depth order regularization.")
         print(f"        > Using expected depth with depth_ratio {self.depth_order_config['depth_ratio']} for depth order regularization.")
         self.depth_priors = []
-        for camera in self.scene.train_cameras:
-            depth = camera._cam.depth.detach().clone()
-            self.depth_priors.append(depth)
+        cameras = deepcopy(self.scene.train_cameras)
+        cameras.sort(lambda x: x.uid)
+        for camera in cameras:
+            depth = camera._cam.depth.detach().clone()  # (H_0, W_0)
+            # F.interpolate 需要 (N, C, H, W)，先加 batch 和 channel 再插值
+            depth_4d = depth.unsqueeze(0).unsqueeze(0)  # (1, 1, H_0, W_0)
+            depth_resized = F.interpolate(
+                depth_4d,
+                size=(camera._cam.height, camera._cam.width),
+                mode="bilinear",
+                align_corners=True
+            )  # (1, 1, H, W)
+            depth_resized = depth_resized.squeeze(0).squeeze(0)  # (H, W)
+            self.depth_priors.append(depth_resized)
 
         # Get mesh regularization config file
         mesh_config_file = os.path.join(BASE_DIR, "configs", "mesh", f"{args.mesh_config}.yaml")
@@ -191,9 +205,9 @@ class Trainer(BaseGSTrainer):
         self.depth_order_kick_on = True
         return
 
-    def renderImage(self, viewpoint_idx: int) -> dict:
+    def renderImage(self, viewpoint: GSCamera) -> dict:
         return render(
-            self.scene[viewpoint_idx],
+            viewpoint,
             self.gaussians,
             self.pipe,
             self.background,
@@ -201,14 +215,13 @@ class Trainer(BaseGSTrainer):
             require_depth=True,
         )
 
-    def render_full(self, viewpoint_idx) -> dict:
-        camera_idx = viewpoint_idx % len(self.scene)
+    def render_full(self, viewpoint: GSCamera) -> dict:
         return render_full(
-            self.scene[viewpoint_idx],
+            viewpoint,
             self.gaussians,
             self.pipe,
             self.background,
-            culling=self.gaussians._culling[:, camera_idx],
+            culling=self.gaussians._culling[:, viewpoint.uid],
             compute_expected_normals=False,
             compute_expected_depth=True,
             compute_accurate_median_depth_gradient=True,
@@ -223,10 +236,8 @@ class Trainer(BaseGSTrainer):
         if iteration % 1000 == 0:
             self.gaussians.oneupSHdegree()
 
-        viewpoint_idx = iteration % len(self.scene)
-
-        viewpoint_cam = self.scene[viewpoint_idx]
-        depth_prior = self.depth_priors[viewpoint_idx]
+        viewpoint_cam = self.scene[iteration]
+        depth_prior = self.depth_priors[viewpoint_cam.uid]
 
         reg_kick_on = iteration >= self.args.regularization_from_iter
         mesh_kick_on = iteration >= self.mesh_config["start_iter"]
@@ -234,12 +245,12 @@ class Trainer(BaseGSTrainer):
         # If depth-normal regularization or mesh-in-the-loop regularization are active,
         # we use the rasterizer compatible with depth and normal rendering.
         if reg_kick_on or mesh_kick_on:
-            render_pkg = self.renderImage(viewpoint_idx)
+            render_pkg = self.renderImage(viewpoint_cam)
 
         # Else, if depth-order regularization is active, we use Mini-Splatting2 rasterizer 
         # but we render depth maps. This rasterizer is necessary for densification and simplification.
         else:
-            render_pkg = self.render_full(viewpoint_idx)
+            render_pkg = self.render_full(viewpoint_cam)
 
         image, viewspace_point_tensor, visibility_filter, radii = (
             render_pkg["render"], render_pkg["viewspace_points"], 
@@ -249,7 +260,7 @@ class Trainer(BaseGSTrainer):
 
         # Rendering loss
         if self.args.decoupled_appearance:
-            reg_loss = L1_loss_appearance(image, gt_image, self.gaussians, viewpoint_idx)
+            reg_loss = L1_loss_appearance(image, gt_image, self.gaussians, viewpoint_cam)
         else:
             reg_loss = l1_loss(image, gt_image)
 
@@ -314,7 +325,7 @@ class Trainer(BaseGSTrainer):
                 iteration=iteration,
                 render_pkg=render_pkg,
                 viewpoint_cam=viewpoint_cam,
-                viewpoint_idx=viewpoint_idx,
+                viewpoint_idx=viewpoint_cam.uid,
                 gaussians=self.gaussians,
                 scene=self.scene,
                 pipe=self.pipe,
@@ -363,14 +374,14 @@ class Trainer(BaseGSTrainer):
 
     @torch.no_grad()
     def recordGrads(self, iteration: int, render_pkg: dict) -> bool:
-        camera_idx = iteration % len(self.scene)
+        viewpoint = self.scene[iteration]
 
         viewspace_point_tensor, visibility_filter, radii = render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
 
         # Keep track of max radii in image-space for pruning
         self.gaussians.max_radii2D[visibility_filter] = torch.max(self.gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
 
-        if self.gaussians._culling[:, camera_idx].sum()==0:
+        if self.gaussians._culling[:, viewpoint.uid].sum()==0:
             self.gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
         else:
             # normalize xy gradient after culling
@@ -444,11 +455,11 @@ class Trainer(BaseGSTrainer):
         for idx in trange(render_image_num):
             viewpoint = self.scene[idx]
 
-            render_pkg = self.renderImage(idx)
+            render_pkg = self.renderImage(viewpoint)
 
             if not self.is_gt_logged:
-                depth_prior = self.depth_priors[idx]
-                self.logger.summary_writer.add_images("view_{}/depth_prior".format(viewpoint.image_name), depth_prior[None], global_step=iteration)
+                depth_prior = self.depth_priors[viewpoint.uid]
+                self.logger.summary_writer.add_images("view_{}/depth_prior".format(viewpoint.image_name), depth_prior[None][None], global_step=iteration)
 
                 depth_prior_normal = (1. - depth_to_normal(viewpoint, depth_prior)) / 2.
                 self.logger.summary_writer.add_images("view_{}/depth_prior_normal".format(viewpoint.image_name), depth_prior_normal[None], global_step=iteration)
@@ -466,7 +477,7 @@ class Trainer(BaseGSTrainer):
                     iteration=iteration,
                     render_pkg=render_pkg,
                     viewpoint_cam=viewpoint,
-                    viewpoint_idx=idx,
+                    viewpoint_idx=viewpoint.uid,
                     gaussians=self.gaussians,
                     scene=self.scene,
                     pipe=self.pipe,
@@ -487,7 +498,7 @@ class Trainer(BaseGSTrainer):
                     mesh_render_pkg["depth"].detach(),
                     mesh_render_pkg["depth"].detach().max().item(),
                 )
-                self.logger.summary_writer.add_images("view_{}/mesh_depth".format(viewpoint.image_name), mesh_depth[None], global_step=iteration)
+                self.logger.summary_writer.add_images("view_{}/mesh_depth".format(viewpoint.image_name), mesh_depth[None][None], global_step=iteration)
 
                 mesh_normal = (1. - fix_normal_map(viewpoint, mesh_render_pkg["normals"].detach())) / 2.
                 self.logger.summary_writer.add_images("view_{}/mesh_normal".format(viewpoint.image_name), mesh_normal[None], global_step=iteration)
@@ -502,7 +513,7 @@ class Trainer(BaseGSTrainer):
 
     @torch.no_grad()
     def saveScene(self, iteration: int) -> bool:
-        torch.save((self.gaussians.capture(), iteration), self.scene.model_path + "/chkpnt" + str(iteration) + ".pth")  
+        torch.save((self.gaussians.capture(), iteration), self.dataset.model_path + "/chkpnt" + str(iteration) + ".pth")  
         return True
 
     def train(self, iteration_num: int = 30000):
