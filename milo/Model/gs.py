@@ -1066,7 +1066,7 @@ class GaussianModel:
 
         out_pts_list=[]
         gt_list=[]
-        views = scene.getTrainCameras_warn_up(iteration, args.warn_until_iter, scale=1.0, scale2=2.0).copy()
+        views = scene.train_cameras
         for view in views:
             gt = view.original_image[0:3, :, :]
 
@@ -1115,7 +1115,7 @@ class GaussianModel:
 
         imp_score = torch.zeros(self._xyz.shape[0]).cuda()
         accum_area_max = torch.zeros(self._xyz.shape[0]).cuda()
-        views = scene.getTrainCameras_warn_up(iteration, args.warn_until_iter, scale=1.0, scale2=2.0).copy()
+        views = scene.train_cameras
         for view in views:
             render_pkg = render_simp(view, self, pipe, background, culling=self._culling[:,view.uid])
             
@@ -1155,7 +1155,7 @@ class GaussianModel:
 
         imp_score = torch.zeros(self._xyz.shape[0]).cuda()
         accum_area_max = torch.zeros(self._xyz.shape[0]).cuda()
-        views = scene.getTrainCameras_warn_up(iteration, args.warn_until_iter, scale=1.0, scale2=2.0).copy()
+        views = scene.train_cameras
         for view in views:
             render_pkg = render_simp(view, self, pipe, background, culling=self._culling[:,view.uid])
             
@@ -1182,7 +1182,7 @@ class GaussianModel:
     def importance_pruning(self, scene, render_simp, iteration, args, pipe, background):
 
         imp_score = torch.zeros(self._xyz.shape[0]).cuda()
-        views = scene.getTrainCameras_warn_up(iteration, args.warn_until_iter, scale=1.0, scale2=2.0).copy()
+        views = scene.train_cameras
         for view in views:
             render_pkg = render_simp(view, self, pipe, background, culling=self._culling[:,view.uid])
             accum_weights = render_pkg["accum_weights"]
@@ -1200,7 +1200,7 @@ class GaussianModel:
     def visibility_culling(self, scene, render_simp, iteration, args, pipe, background):
 
         imp_score = torch.zeros(self._xyz.shape[0]).cuda()
-        views = scene.getTrainCameras_warn_up(iteration, args.warn_until_iter, scale=1.0, scale2=2.0).copy()
+        views = scene.train_cameras
 
         self._culling=torch.zeros((self._xyz.shape[0], len(views)), dtype=torch.bool, device='cuda')
 
@@ -1233,7 +1233,7 @@ class GaussianModel:
 
         imp_score = torch.zeros(self._xyz.shape[0]).cuda()
         accum_area_max = torch.zeros(self._xyz.shape[0]).cuda()
-        views = scene.getTrainCameras_warn_up(iteration, args.warn_until_iter, scale=1.0, scale2=2.0).copy()
+        views = scene.train_cameras
 
         for view in views:
             # render_pkg = render_simp(view, self, pipe, background)
@@ -1259,7 +1259,7 @@ class GaussianModel:
 
         imp_score = torch.zeros(self._xyz.shape[0]).cuda()
         accum_area_max = torch.zeros(self._xyz.shape[0]).cuda()
-        views = scene.getTrainCameras_warn_up(iteration, args.warn_until_iter, scale=1.0, scale2=2.0).copy()
+        views = scene.train_cameras
 
         self._culling=torch.zeros((self._xyz.shape[0], len(views)), dtype=torch.bool, device='cuda')
 
@@ -1342,7 +1342,7 @@ class GaussianModel:
 
         imp_score = torch.zeros(self._xyz.shape[0]).cuda()
         accum_area_max = torch.zeros(self._xyz.shape[0]).cuda()
-        views = scene.getTrainCameras_warn_up(iteration, args.warn_until_iter, scale=1.0, scale2=2.0).copy()
+        views = scene.train_cameras
 
         self._culling=torch.zeros((self._xyz.shape[0], len(views)), dtype=torch.bool, device='cuda')
 
@@ -1388,7 +1388,7 @@ class GaussianModel:
 
         imp_score = torch.zeros(self._xyz.shape[0]).cuda()
         accum_area_max = torch.zeros(self._xyz.shape[0]).cuda()
-        views = scene.getTrainCameras_warn_up(iteration, args.warn_until_iter, scale=1.0, scale2=2.0).copy()
+        views = scene.train_cameras
 
         self._culling=torch.zeros((self._xyz.shape[0], len(views)), dtype=torch.bool, device='cuda')
 
@@ -1443,7 +1443,7 @@ class GaussianModel:
     def culling_with_importance_pruning(self, scene, render_simp, iteration, args, pipe, background):
 
         imp_score = torch.zeros(self._xyz.shape[0]).cuda()
-        views = scene.getTrainCameras_warn_up(iteration, args.warn_until_iter, scale=1.0, scale2=2.0).copy()
+        views = scene.train_cameras
 
         self._culling=torch.zeros((self._xyz.shape[0], len(views)), dtype=torch.bool, device='cuda')
 
@@ -1482,7 +1482,7 @@ class GaussianModel:
     def sample_surface_gaussians(self, scene, render_simp, iteration, args, pipe, background, n_samples, sampling_mask=None):
         imp_score = torch.zeros(self._xyz.shape[0]).cuda()
         accum_area_max = torch.zeros(self._xyz.shape[0]).cuda()
-        views = scene.getTrainCameras_warn_up(iteration, args.warn_until_iter, scale=1.0, scale2=2.0).copy()
+        views = scene.train_cameras
 
         self._culling=torch.zeros((self._xyz.shape[0], len(views)), dtype=torch.bool, device='cuda')
 
