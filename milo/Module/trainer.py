@@ -5,7 +5,6 @@ import yaml
 import torch
 import torch.nn.functional as F
 
-from copy import deepcopy
 from typing import Tuple
 from functools import partial
 from tqdm import tqdm, trange
@@ -156,10 +155,8 @@ class Trainer(BaseGSTrainer):
         # ---Prepare Depth-Order Regularization---    
         print("[INFO] Using depth order regularization.")
         print(f"        > Using expected depth with depth_ratio {self.depth_order_config['depth_ratio']} for depth order regularization.")
-        self.depth_priors = []
-        cameras = deepcopy(self.scene.train_cameras)
-        cameras.sort(lambda x: x.uid)
-        for camera in cameras:
+        self.depth_priors = [None] * len(self.scene)
+        for camera in self.scene.train_cameras:
             depth = camera._cam.depth.detach().clone()  # (H_0, W_0)
             # F.interpolate 需要 (N, C, H, W)，先加 batch 和 channel 再插值
             depth_4d = depth.unsqueeze(0).unsqueeze(0)  # (1, 1, H_0, W_0)
@@ -170,7 +167,7 @@ class Trainer(BaseGSTrainer):
                 align_corners=True
             )  # (1, 1, H, W)
             depth_resized = depth_resized.squeeze(0).squeeze(0)  # (H, W)
-            self.depth_priors.append(depth_resized)
+            self.depth_priors[camera.uid] = depth_resized
 
         # Get mesh regularization config file
         mesh_config_file = os.path.join(BASE_DIR, "configs", "mesh", f"{args.mesh_config}.yaml")
